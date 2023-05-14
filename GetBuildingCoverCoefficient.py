@@ -17,7 +17,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import time
-
+BACKGROUND = 0.0
 
 def make_dir(path):
     if os.path.exists(path):
@@ -102,6 +102,12 @@ class GetBuildingCoverCoefficient:
         assert len(boxes) > 0
         shadow_boxes = []
         shadow_masks = []
+        shadow_heights = []
+        shadow_cover_map = np.zeros_like(self.foorprint).astype(np.int32)
+        shadow_cover_map[shadow_cover_map == 0] = BACKGROUND
+        shadow_heights_map = np.zeros_like(self.foorprint).astype(np.float32)
+        shadow_heights_map[shadow_heights_map == 0.0] = BACKGROUND
+
         for ii in range(len(boxes)):
             height = heights[ii]
             mask = masks[ii]
@@ -120,7 +126,6 @@ class GetBuildingCoverCoefficient:
                 xbuf_min, ybuf_min, xbuf_max, ybuf_max = x_min - eastwest_buffer_number, y_min, x_max + eastwest_buffer_number, y_max - shadow_buffer_pixels
                 # print("阴影朝向：南方")
 
-
             # 图像条件约束
             assert ybuf_min <= ybuf_max
             y_min, x_min, y_max, x_max = ybuf_min if ybuf_min > 0 else 0,\
@@ -132,18 +137,60 @@ class GetBuildingCoverCoefficient:
             shadow_box = [x_min, y_min, x_max, y_max]
             shadow_boxes.append(shadow_box)
 
-            #得到shadow的mask
+            # 得到shadow的mask
             shadow_polys = self.get_shadow_poly_points(box, shadow_box, building_length, building_width, time_hour, shadow_buffer_pixels>=0)
-            shadow_mask = self.get_shadow_mask(shadow_polys, mask)
-            shadow_masks.append(shadow_mask)
-        shadow_cover_map = np.zeros_like(self.foorprint).astype(np.int32)
-        for shadow_mask in shadow_masks:
-            shadow_cover_map += shadow_mask
-        shadow_cover_rate = self.get_shadow_cover_rate(shadow_cover_map, masks, areas)
+            shadow_mask = self.get_shadow_mask(shadow_polys, mask)  #得到此建筑物对应的shadow mask
+            shadow_height = self.get_shadow_height_change(shadow_mask, shadow_polys, height, box, if_north=shadow_buffer_pixels>=0)  #得到此建筑物对应的shadow mask以及它在不同地方的高度信息
+
+            # 向整体整合
+            shadow_cover_map += shadow_mask  # only when BACKGROUND=0
+            shadow_heights_map = np.where(shadow_height > shadow_heights_map, shadow_height, shadow_heights_map)
+
+        shadow_cover_rate = self.get_shadow_cover_rate(shadow_cover_map,shadow_heights_map, masks, areas, heights)
         self.result = shadow_cover_rate
         return shadow_cover_map, shadow_cover_rate
 
-    def get_shadow_poly_points(self, box, shadow_box, building_length, building_width, time_hour, if_shadow_in_north):
+    def get_shadow_height_change(self, shadow_mask, shadow_polys, building_height, box, if_north=True):
+        shadow_points = np.array([shadow_polys[2],shadow_polys[3]])
+        shadow_height = np.zeros_like(self.foorprint).astype(np.float32)
+        shadow_height[shadow_height == 0.0] = BACKGROUND
+        if if_north:
+            shadow_northmost = np.min(shadow_points[:, 1])
+            building_northmost = box[1]
+            north_distance = int(building_northmost-shadow_northmost)
+            assert north_distance >= 0
+            shadow_height[shadow_mask != BACKGROUND] = building_height/2
+
+            if north_distance <= 1:
+                return shadow_height
+            else:
+                height_bin = building_height/(north_distance*2)
+                for i in range(north_distance):
+                    shadow_y = building_northmost - i  # north -1,  south +1
+                    height_temp = building_height - (i*2 + 1)*height_bin
+                    shadow_temp = shadow_height
+                    shadow_height[shadow_y, :] = height_temp
+                    shadow_height[shadow_temp == BACKGROUND] = BACKGROUND
+        else:
+            shadow_southmost = np.max(shadow_points[:, 1])
+            building_southmost = box[3]
+            south_distance = shadow_southmost-building_southmost
+            assert south_distance >= 0
+            shadow_height[shadow_mask != BACKGROUND] = building_height / 2
+
+            if south_distance <= 1:
+                return shadow_height
+            else:
+                height_bin = building_height / (south_distance * 2)
+                for i in range(south_distance):
+                    shadow_y = south_distance + i  # north -1,  south +1
+                    height_temp = building_height - (i * 2 + 1) * height_bin
+                    shadow_temp = shadow_height
+                    shadow_height[shadow_y, :] = height_temp
+                    shadow_height[shadow_temp == BACKGROUND] = BACKGROUND
+        return shadow_height
+
+    def get_shadow_poly_points(self, box, shadow_box, building_length, building_width, time_hour, if_shadow_in_north, index=0):
         '''
         得到每个建筑物对应的阴影的多边形坐标
         :param box: 此建筑物的外包矩形框坐标
@@ -278,19 +325,33 @@ class GetBuildingCoverCoefficient:
         shadow_mask[mask == 1] = 0
         return shadow_mask
 
-    def get_shadow_cover_rate(self, shadow_cover_map, masks, areas):
+    def get_shadow_cover_rate(self, shadow_cover_map, shadow_heights_map, masks, areas, heights):
         '''
-        根据阴影的覆盖次数、建筑物本身的mask以及其面积，得到建筑物被覆盖率
+        根据阴影的覆盖次数、建筑物本身的mask、以及其面积、阴影高度，得到建筑物被覆盖率
         '''
         assert len(areas) == len(masks)
         rate_map = np.zeros_like(self.foorprint).astype(np.float32)
         for ii in range(len(areas)):
             area = areas[ii]
+            assert area > 0
             mask = masks[ii]
-            cover_num = np.sum(shadow_cover_map[mask == 1]) if np.sum(shadow_cover_map[mask == 1]) <= (2*area) else (2*area)
-            rate = 1 - (cover_num / (2*area))
-            assert (rate >= 0) and (rate <= 1)
+            height = heights[ii]
+            ## 以下是第一版计算方法
+            # cover_num = np.sum(shadow_cover_map[mask == 1]) if np.sum(shadow_cover_map[mask == 1]) <= (2*area) else (2*area)
+            # rate = 1 - (cover_num / (2*area))
+            # assert (rate >= 0) and (rate <= 1)
+            # rate_map[mask == 1] = rate
+
+            #以下是第二版计算方法，以建筑物不被阴影覆盖的部分为主要参考条件，结合阴影考虑
+            shadow_height_on_building = shadow_heights_map[mask == 1]  # 得到建筑物足迹内的阴影高度分布
+            shadow_cover_on_building = shadow_cover_map[mask == 1]  # 得到建筑物足迹内的阴影覆盖次数分布
+            shadow_cover_on_building[shadow_height_on_building < height] = 0  # 建筑物若比阴影高，则这个地方视为不被覆盖
+            cover_once = len(shadow_cover_on_building[shadow_cover_on_building == 1])
+            no_cover = len(shadow_cover_on_building[shadow_cover_on_building == 0])
+            no_cover_area = cover_once*0.3 + no_cover
+            rate = no_cover_area / area  # 最后阴影系数就是建筑物不被覆盖区域占总区域的比例
             rate_map[mask == 1] = rate
+
         return rate_map
 
     def get_buffer_number(self, height=20):
@@ -350,7 +411,7 @@ def main(footprint_data, buildingheight_data):
 if __name__ == '__main__':
     footprint_path = r'D:\Dataset\Beijing_xiaotong\footprint.tif'
     height_path = r'D:\Dataset\Beijing_xiaotong\buildingheight.tif'
-    save_path = r'D:\Dataset\Beijing_xiaotong\result.tif'
+    save_path = r'D:\Dataset\Beijing_xiaotong\result_2.tif'
     # data preprocessing
     print('------------数据预处理中--------------\n')
     footprint_data = cv2.imread(footprint_path, -1)
