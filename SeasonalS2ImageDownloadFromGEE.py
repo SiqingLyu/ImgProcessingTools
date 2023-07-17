@@ -3,7 +3,6 @@
 Author： Lv
 Date: 2023/07/06
 Last coded: 2023/07/06
-
 '''
 
 # coding:utf-8
@@ -81,7 +80,7 @@ class GEEDownloader:
         self.save_path = save_path
         self.cloud_pct = cloud_pct
 
-    def download_seasonal_s2(self, shp_file, year, period_buffer=0):
+    def download_seasonal_s2(self, shp_file, year, loc_name, period_buffer=0):
         period = get_period(year)
         for season in ['spring', 'summer', 'autumn', 'winter', 'all']:
             make_dir(f"{self.save_path}/{season}")
@@ -96,7 +95,7 @@ class GEEDownloader:
                     .map(maskS2clouds)
                 )
                 image = s2_collection.median().select(['B2', 'B3', 'B4', 'B8']).clip(shp_file)
-                save_name = f"{self.save_path}/{season}/{period[0].split('-')[0]}_s2.tif"
+                save_name = f"{self.save_path}/{loc_name}/{season}/{period[0].split('-')[0]}_s2.tif"
                 geemap.download_ee_image(image, scale=10, region=shp_file, crs="EPSG:4326")
                 tif_statu = tif_file_check(save_name)
                 if tif_statu == 'acceptable' or period_buffer >= 30:
@@ -104,11 +103,11 @@ class GEEDownloader:
                 elif tif_statu == 'much nodata':
                     os.remove(save_name)
                     period_buffer_temp = period_buffer + 5
-                    self.download_seasonal_s2(shp_file, year, period_buffer_temp)
+                    self.download_seasonal_s2(shp_file, year, loc_name, period_buffer_temp)
                 else:
                     os.remove(save_name)
                     period_buffer_temp = period_buffer + 10
-                    self.download_seasonal_s2(shp_file, year, period_buffer_temp)
+                    self.download_seasonal_s2(shp_file, year, loc_name, period_buffer_temp)
 
             except (ee.EEException, urllib3.exceptions.HTTPError) as e:
                 if debug:
@@ -124,10 +123,11 @@ def main(shp_path, loc_names, save_path):
             continue
         s2_downloader = GEEDownloader(loc_names, save_path)
         shp_file = geemap.shp_to_ee(file_path)
-        s2_downloader.download_seasonal_s2(shp_file=shp_file, year=2018)
+        s2_downloader.download_seasonal_s2(shp_file=shp_file, year=2018, loc_names=loc_names)
 
 
 if __name__ == '__main__':
+    loc_names = ['Beijing']
     # For users in mainland China, you need to use a VPN and configure a proxy here, because google services are not
     # accessible in China
     # For other regions, you can comment out the following
@@ -160,7 +160,7 @@ if __name__ == '__main__':
                 os.makedirs(location_path, exist_ok=True)
                 sub_location_path = os.path.join(location_path, str(loc_id))
                 os.makedirs(sub_location_path, exist_ok=True)
-                main(shp_path, loc_names, save_path)
+                main(shp_path = r' ', loc_names=loc_names, save_path=r'D:\Data\GEE数据文件夹\测试数据')
         return
 
 
