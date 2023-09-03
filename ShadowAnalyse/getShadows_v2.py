@@ -1,6 +1,4 @@
 
-# yangzhen
-# 2020.4.13
 """get the shadow proportion form images
    of remote sensing"""
 import numpy as np
@@ -13,7 +11,9 @@ from matplotlib import pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import LinearSegmentedColormap
 from pylab import mpl
+from sklearn.decomposition import PCA
 import random
+import colorsys
 from getLabelBox import get_boxes_maskes_byskimage
 from PIL import Image,ImageEnhance
 
@@ -126,7 +126,7 @@ def FinalTrare(img):
 
 
 def getShadowinfo(data_array, building_shadow_buffer, data_mask, buffer_box_rc,
-                  plot_shadow=False, img_size = 128, delete_no_connected=False, floor=0):
+                  plot_shadow='', img_size = 128, delete_no_connected=False, floor=0):
     '''
     :param data_mask: 0-1 array[buffer_H, buffer_W], building(>0) & shadow(-1) mask
     :param shadow_mask: 0-1 array[buffer_H, buffer_W], shadow mask
@@ -179,7 +179,7 @@ def getShadowinfo(data_array, building_shadow_buffer, data_mask, buffer_box_rc,
     shadow_result[shadow_result == -1] = 1
     shadow[shadow == -1] = 1
     if plot_shadow:  #可视化
-        if shadow_area >=1 and floor==20:
+        if shadow_area >=1 and floor == int(plot_shadow.split('_')[1]):
             color_list = ['#00000000', '#4cb4e7']
             my_cmap = LinearSegmentedColormap.from_list('mcmp', color_list)
             cm.register_cmap(cmap=my_cmap)
@@ -212,7 +212,7 @@ def cut_data_save(data, savepath, positions, img_size=128):
 
 
 def getShadows(filename, tif_file_data, building_shadow_data, label_data,
-               img_size=128, shadow_area_thd=1, plot_shadow=False,
+               img_size=128, shadow_area_thd=1, plot_shadow='',
                delete_no_connected=True):
     building_top_muxs = []
     building_buffer_muxs = []
@@ -228,8 +228,7 @@ def getShadows(filename, tif_file_data, building_shadow_data, label_data,
     for i in range(len(labels)):
         box = boxes[i]
         mask = masks[i]
-        # floor = labels[i]
-        floor = 30
+        floor = labels[i]
         x_min, y_min, x_max, y_max = box # west, north, east, south
         xbuf_min, ybuf_min, xbuf_max, ybuf_max = x_min - 4, y_min - int(np.ceil(floor/3) + 1), x_max + 4, y_max
         row_min, col_min, row_max, col_max = ybuf_min if ybuf_min > 0 else 0, xbuf_min if xbuf_min > 0 else 0,\
@@ -276,7 +275,86 @@ def getShadows(filename, tif_file_data, building_shadow_data, label_data,
     return ShadowsInfos
 
 
-def shadow_extract(filename, lab_path, plot_shadow=False):
+def get_shadow_index_LDV(data):
+    assert data.shape[2] == 4, 'LDV needs 4 bands (GBRN)'
+
+    idist = GetColor(data)
+    ilight = GetLight(data)
+    ivege = GetVege(data)
+    iwater = GetWater(data)
+    final = GetLDV(idist, ilight, ivege, iwater)
+    return final
+
+
+def get_shadow_index_MSDI(data):
+    assert data.shape[2] == 4, 'MSDI needs 4 bands (GBRN)'
+
+    data_tmp = data.reshape(-1, data.shape[2])
+    pca = PCA(n_components=1)
+    pixels_transformed = pca.fit_transform(data_tmp)
+    PC1 = pixels_transformed.reshape((data.shape[0], data.shape[1]))
+    B = data[:, :, 0]
+    G = data[:, :, 1]
+    R = data[:, :, 2]
+    N = data[:, :, 3]
+    # print(N.shape)
+    MSDI = (1 - PC1) * ((B + G) / (N + R)) * ((G-R) / (G + R))
+    return MSDI
+
+
+def get_shadow_index_MC3(data):
+    assert data.shape[2] == 4, 'MC3 needs 4 bands (GBRN)'
+
+    B = data[:, :, 0]
+    G = data[:, :, 1]
+    R = data[:, :, 2]
+    N = data[:, :, 3]
+    C1 = np.arctan(R / np.maximum(np.maximum(G, B), N))
+    C2 = np.arctan(G / np.maximum(np.maximum(N, B), R))
+    C3 = np.arctan(B / np.maximum(np.maximum(N, R), G))
+    C4 = np.arctan(N / np.maximum(np.maximum(G, R), B))
+    MC3 = C1*C2*C3*C4
+    return MC3
+
+
+def get_HSV(data, opt='RGB'):
+    if opt == 'GBRN':
+        RGB_data = np.concatenate((data[:, :, 2:3],  # R
+                                   data[:, :, 1:2],  # G
+                                   data[:, :, 0:1]   # B
+                                   ), axis=2)
+    elif opt == 'RGB':
+        RGB_data = np.copy(data)
+    else:
+        print("only images with channel numer 4(GBRN) or 3(RGB) are supported.")
+        return None
+    # cv2.cvtColor(RGB_data, RGB_data, cv2.COLOR_BGR2Luv)
+    HSV = cv2.cvtColor(np.float32(RGB_data), cv2.COLOR_BGR2HSV)
+    return HSV
+
+
+def get_shadow_index_NSVDI(data):
+    HSV = get_HSV(data, opt='GBRN' if (data.shape[2] == 4) else 'RGB')
+    # H = HSV[:, :, 0]
+    S = HSV[:, :, 1]
+    V = HSV[:, :, 2]
+    NSVDI = (S -V) / (S + V)
+    return NSVDI
+
+
+def get_shadow_index_LNMPSI(data):
+    assert data.shape[2] == 4, 'LNMPSI needs 4 bands (GBRN)'
+
+    N = data[:, :, 3]
+    HSV = get_HSV(data, opt='GBRN')
+    H = HSV[:, :, 0]
+    S = HSV[:, :, 1]
+    V = HSV[:, :, 2]
+    LNMPSI = np.log(N * ( (H-V)/(H+V) ) * ( (S-V)/(S+V) ) + 1)
+    return LNMPSI
+
+
+def shadow_extract(filename, lab_path, plot_shadow='', index='LDV'):
     img = tif.imread(filename)
     ref_path = lab_path + '\\' + filename.split('\\')[-1]
     assert os.path.isfile(ref_path), 'label文件名有误'
@@ -284,17 +362,28 @@ def shadow_extract(filename, lab_path, plot_shadow=False):
     ref_fp = np.where(ref > 0, 1, 0)
     # 获取阴影
     img1 = img.copy()
-    plot_figure(np.concatenate((img1[:, :, 2:3],
-                                img1[:, :, 1:2],
-                                img1[:, :, 0:1]), axis=2), '影像')
-    img1 = img1.astype(np.float)
+    RGB_img = np.concatenate((img1[:, :, 2:3],  # R
+                              img1[:, :, 1:2],  # G
+                              img1[:, :, 0:1]   # B
+                              ), axis=2)
+    plot_figure(RGB_img, '原始影像')
+    img1 = img1.astype(float)
     img1 = Normalize(img1)
 
-    idist = GetColor(img1)
-    ilight = GetLight(img1)
-    ivege = GetVege(img1)
-    iwater = GetWater(img1)
-    final = GetLDV(idist, ilight, ivege, iwater)
+    if index == 'LDV':
+        final = get_shadow_index_LDV(img1)  # change with other indexes
+    elif index == 'MSDI':
+        final = get_shadow_index_MSDI(img1)  # change with other indexes
+    elif index == 'NSVDI':
+        final = get_shadow_index_NSVDI(img1)  # change with other indexes
+    elif index == 'MC3':
+        final = get_shadow_index_MC3(img1)  # change with other indexes
+    elif index == 'LNMPSI':
+        final = get_shadow_index_LNMPSI(img1)  # change with other indexes
+    else:
+        print(f"No index{index} is available!")
+        return None
+
     shadow = FinalTrare(final)
     if plot_shadow:
         # 可视化
@@ -313,12 +402,14 @@ def shadow_extract(filename, lab_path, plot_shadow=False):
     return shadow, img, ref
 
 
-def get_shadowinfos(filepath='', lab_path='', city='Xian', plot_shadow=False):
+def get_shadowinfos(filepath='', lab_path='', city='Xian', plot_shadow=''):
     # 获取输入图片路径
     if city == 'all':
         city = ''
     filenames = glob.glob(filepath + f'\\{city}*')
     ShadowsInfo_imgs = []
+
+
     for filename in filenames:
         assert os.path.isfile(filename), '文件名有误'
 
@@ -326,7 +417,30 @@ def get_shadowinfos(filepath='', lab_path='', city='Xian', plot_shadow=False):
         shadow = np.where(shadow == 255, -1, shadow)
         data_buildingshadow = np.where(ref>0, ref, shadow)
         ShadowsInfo_img = getShadows(filename, img, data_buildingshadow, ref, 128, 0,
-                                     plot_shadow=plot_shadow, delete_no_connected=True)
+                                     plot_shadow=plot_shadow,delete_no_connected=True)
         ShadowsInfo_imgs.append(ShadowsInfo_img)
     plt.show()
     return ShadowsInfo_imgs
+
+
+def single_image_plot(filename, lab_path, plot_shadow):
+    ShadowsInfo_imgs = []
+
+    assert os.path.isfile(filename), '文件名有误'
+
+    shadow, img, ref = shadow_extract(filename, lab_path, plot_shadow=plot_shadow)
+    shadow = np.where(shadow == 255, -1, shadow)
+    data_buildingshadow = np.where(ref > 0, ref, shadow)
+    ShadowsInfo_img = getShadows(filename, img, data_buildingshadow, ref, 128, 0,
+                                 plot_shadow=plot_shadow, delete_no_connected=True)
+    ShadowsInfo_imgs.append(ShadowsInfo_img)
+    plt.show()
+
+if __name__ == '__main__':
+
+    # data = tif.imread(r'F:\ExperimentData\SEASONet\Data\image\optical\Beijing_5_12.tif')
+    # get_shadow_index_MSDI(data)
+    # get_shadow_index_NSVDI(data)
+    # get_shadow_index_MC3(data)
+    single_image_plot(filename=r'F:\ExperimentData\SEASONet\Data\image\optical\Beijing_5_12.tif',
+                      lab_path=r'F:\ExperimentData\SEASONet\Data\label', plot_shadow='include_15')
